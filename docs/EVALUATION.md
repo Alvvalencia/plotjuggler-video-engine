@@ -1,5 +1,5 @@
 # VideoEngine — Evaluation Plan
-*Standalone Library, C++20 / Qt 6.8 / FFmpeg 8.0.1*
+*Standalone Library, C++20 / Qt 6.8 / FFmpeg 6.1.1 (system)*
 
 ---
 
@@ -12,11 +12,11 @@
 | Date | March 2026 |
 | Reference FPS | 30 FPS |
 | Test framework | Google Test (GTest) — C++20 |
-| C++ standard | C++20 (VideoEngine core) · C++17 compatible (adapter layer) |
+| C++ standard | C++20 |
 | Qt version | 6.8 |
-| FFmpeg | 8.0.1 |
+| FFmpeg | 6.1.1 (system, via pkg-config) |
 | Time unit | microseconds (int64_t) |
-| Overall status | Phase 1 IMPLEMENTED · Phases 2–6 UNBLOCKED (conditionally) · Phase 7 DEFERRED |
+| Overall status | Phases 1–3 complete (59/59 tests, ASan clean) · Phase 4 next · Phases 5–7 pending |
 
 ---
 
@@ -31,31 +31,15 @@ This document defines the complete evaluation plan for the VideoEngine standalon
 
 ---
 
-## Architecture Summary
+## Architecture Reference
 
-The VideoEngine project is composed of two layers. Refer to `ARCHITECTURE.md` for full detail.
+All interfaces, state machine, and component descriptions live in `ARCHITECTURE.md`. This document only defines test cases and pass criteria.
 
-### `IVideoBackend`
-Pure abstract C++ class that defines the video backend contract. The control layer only knows this interface — never the concrete implementation.
-
-Methods: `open(path)` | `play()` | `pause()` | `stop()` | `seek(t_us)` | `getFrame()` | `getState()`
-
-> **Time unit note:** The seek unit is **microseconds** throughout the project.
-
-### `MockVideoBackend`
-Fake implementation of `IVideoBackend` for tests. No dependency on any real video library. Simulates states, errors, and seek behavior with predefined values.
-
-### `VideoController`
-Adapter class containing all playback control logic (play/pause/seek/stop). Receives an `IVideoBackend` via dependency injection. This is the class under test in Phase 1.
-
-At integration time, `VideoController` becomes a `PJ::StatePublisher` adapter — see Phase 7.
-
-### `FFmpegBackend` (Phase 2+)
-Production implementation of `IVideoBackend` using FFmpeg 8.0.1. Wraps the VideoEngine internal pipeline (PlaybackController, VideoSource, PacketQueue, VideoDecoder, FrameBuffer). `IVideoBackend` is the only coupling point — VideoController never touches the internals.
+**Key facts for testers:** `VideoController` is the class under test. It wraps an `IVideoBackend` (mock or real) via dependency injection. All time units are **microseconds** (`int64_t`). Redundant operations (e.g. `pause()` when already PAUSED) are no-ops, not errors.
 
 ---
 
-## PHASE 1 — Unit Tests `✅ IMPLEMENTED`
+## PHASE 1 — Unit Tests `COMPLETE`
 
 | Field | Value |
 |---|---|
@@ -70,7 +54,7 @@ Production implementation of `IVideoBackend` using FFmpeg 8.0.1. Wraps the Video
 | ID | Action | Expected result | Pass criterion |
 |---|---|---|---|
 | UT-SEL-01 | `open()` with valid path (simulated) | State transitions to `LOADED` | `EXPECT_EQ(state, LOADED)` |
-| UT-SEL-02 | `open()` with empty path `""` | Throws or returns error | `EXPECT_THROW` or `EXPECT_FALSE` |
+| UT-SEL-02 | `open()` with empty path `""` | Returns false, state stays `IDLE` | `EXPECT_FALSE(result)` && `EXPECT_EQ(state, IDLE)` |
 | UT-SEL-03 | `open()` with invalid path | State stays `IDLE`, error reported | `EXPECT_EQ(state, IDLE)` |
 | UT-SEL-04 | `open()` when video already loaded | Replaces previous video without crash | No exception, state `LOADED` |
 
@@ -83,17 +67,17 @@ Production implementation of `IVideoBackend` using FFmpeg 8.0.1. Wraps the Video
 | UT-ST-03 | `play()` after `pause()` | State returns to `PLAYING` | `EXPECT_EQ(state, PLAYING)` |
 | UT-ST-04 | `stop()` from any active state | State transitions to `STOPPED` | `EXPECT_EQ(state, STOPPED)` |
 | UT-ST-05 | `play()` without loaded video | No crash, error reported | `EXPECT_FALSE(result)` |
-| UT-ST-06 | `pause()` when already `PAUSED` | State stays `PAUSED` | `EXPECT_EQ(state, PAUSED)` |
+| UT-ST-06 | `pause()` when already `PAUSED` | No-op, returns true, stays `PAUSED` | `EXPECT_TRUE(result)` && `EXPECT_EQ(state, PAUSED)` |
 | UT-ST-07 | `play()` after `stop()` | State transitions to `PLAYING` from beginning | `EXPECT_EQ(state, PLAYING)` |
 
 ### 1.3 — Test cases: Seek logic
 
 | ID | Action | Expected result | Pass criterion |
 |---|---|---|---|
-| UT-SK-01 | `seek(0)` | Position at 0 ms | `EXPECT_EQ(pos_ms, 0)` |
-| UT-SK-02 | `seek(5000)` with duration 10000 ms | Position at 5000 ms | `EXPECT_EQ(pos_ms, 5000)` |
-| UT-SK-03 | `seek(-1)` | Error / exception, position unchanged | `EXPECT_THROW` or pos unchanged |
-| UT-SK-04 | `seek(99999)` beyond end | Clamp to last frame or error | No crash, defined behavior |
+| UT-SK-01 | `seek(0)` | Position at 0 µs | `EXPECT_EQ(pos_us, 0)` |
+| UT-SK-02 | `seek(5'000'000)` with duration 10'000'000 µs | Position at 5'000'000 µs (5 s) | `EXPECT_EQ(pos_us, 5'000'000)` |
+| UT-SK-03 | `seek(-1)` | Returns false, position unchanged | `EXPECT_FALSE(result)` && pos unchanged |
+| UT-SK-04 | `seek(99'000'000)` beyond end | Clamp to `duration - one_frame`, return true | `EXPECT_TRUE(result)` && `EXPECT_EQ(pos_us, duration - 33'333)` |
 | UT-SK-05 | `seek()` during `PLAYING` | Continues playing from new position | `EXPECT_EQ(state, PLAYING)` |
 | UT-SK-06 | `seek()` during `PAUSED` | Position updated, stays `PAUSED` | `EXPECT_EQ(state, PAUSED)` |
 
@@ -101,7 +85,7 @@ Production implementation of `IVideoBackend` using FFmpeg 8.0.1. Wraps the Video
 
 | ID | Action | Expected result | Pass criterion |
 |---|---|---|---|
-| UT-RB-01 | `getFrame()` without loaded video | Returns null or empty frame | `EXPECT_EQ(frame, nullptr)` |
+| UT-RB-01 | `seek(5'000'000)` without loaded video | Returns error, state stays IDLE | `EXPECT_FALSE(result)` |
 | UT-RB-02 | Illegal order calls (`play→play`) | No crash, consistent state | No exception thrown |
 | UT-RB-03 | Destructor with video in `PLAYING` | Clean shutdown, no leak or crash | No crash in destructor |
 | UT-RB-04 | Multiple rapid `seek()` calls | Consistent state at end | Position == last seek |
@@ -112,13 +96,15 @@ Production implementation of `IVideoBackend` using FFmpeg 8.0.1. Wraps the Video
 - 0 crashes (including in destructor and error cases).
 - 0 memory leaks detected with Valgrind or AddressSanitizer.
 - All illegal states produce defined behavior (no undefined behavior).
-- `MockVideoBackend` has zero external dependencies (no FFmpeg, no Qt Multimedia).
+- `MockVideoBackend` has no FFmpeg dependency (Qt Core/Gui/Multimedia required for interface types).
+
+**Result:** 21/21 tests passing, ASan clean. All criteria met.
 
 ---
 
-## PHASE 2 — Integration Tests (Coarse) `🔓 READY`
+## PHASE 2 — Integration Tests (Coarse) `COMPLETE`
 
-> **Unblocked** — technology confirmed: FFmpeg 8.0.1, H.264, MP4, 1080p, 30 FPS CFR.
+> Technology confirmed: FFmpeg 6.1.1 (system), H.264, MP4, 1080p, 30 FPS CFR.
 
 **Goal:** Validate that `FFmpegBackend` correctly decodes and seeks in a real MP4 file. Tests run in the standalone VideoEngine project.
 
@@ -139,20 +125,24 @@ Specifically: `seek(t_us)` must return the correct second in a video with per-se
 **Generation command (FFmpeg):**
 
 ```bash
-ffmpeg -f lavfi -i "color=black:size=1920x1080:rate=30,drawtext=text='%{n}':fontsize=120:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2" \
+ffmpeg -f lavfi -i "color=black:size=1920x1080:rate=30,drawtext=text='%{eif\:floor(t)\:d}':fontsize=120:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2" \
        -t 30 -vcodec libx264 -preset fast -pix_fmt yuv420p -g 30 test_coarse.mp4
 ```
 
-**Video file location:** `tests/data/test_coarse.mp4` — generate before running Phase 2 tests.
+> **Note:** `%{eif\:floor(t)\:d}` renders the current second as an integer (0, 1, 2, ..., 29). Do NOT use `%{n}` — that gives frame numbers (0–899), not seconds.
 
-**Validation tolerance:** `seek(N_us)` must return the frame with number == N (seconds).
-Seek unit in Phase 2 test assertions: **microseconds** (after migration).
+**Video file location:** `tests/data/test_coarse.mp4` — generate via `tests/generate_test_data.sh`.
+
+**Validation tolerance:** `seek(N * 1'000'000)` must return the frame showing second N.
+Seek unit: **microseconds** (`int64_t`) — consistent with the rest of the project.
+
+**Result:** 18 Phase 2 tests passing (DEC-01..08, PQ-01..06, FB-01..04). 39/39 cumulative. ASan clean.
 
 ---
 
-## PHASE 3 — Fine Temporal Tests `🔓 Unblocked pending Phase 2`
+## PHASE 3 — Fine Temporal Tests `COMPLETE`
 
-> **Prerequisite:** Phase 2 complete.
+> Phase 3 tests validate frame-accurate seeking (±1 frame = 33,333 µs), step forward/backward, keyframe index, and frame buffer.
 
 **Goal:** Validate precision at the individual frame level with error < 1 frame (33,333 µs at 30 FPS).
 
@@ -167,17 +157,42 @@ With FPS=30 and N=1 → tolerance_us = 33_333 µs
 
 The value of N will be fixed at 1 unless Phase 2 results justify increasing it.
 
-**Test assertion format (after migration):**
+**Test assertion format:**
 
 ```cpp
 EXPECT_NEAR(pos_us, target_us, 33333);
 ```
 
-Seek unit for Phase 3: **microseconds**.
+**Tests implemented (20 tests across 3 files):**
+
+| File | ID | Test | Verification |
+|------|----|------|-------------|
+| `test_keyframe_index.cpp` | KF-01 | Build index from test video | ~25–35 keyframes, first near PTS 0 |
+| | KF-02 | nearestBefore midpoint (15.5s) | Returns keyframe at ~15s |
+| | KF-03 | nearestBefore(0) | Returns first keyframe |
+| | KF-04 | nearestBefore past end | Returns last keyframe (~29s) |
+| | KF-05 | nearestAfter midpoint (10.5s) | Returns keyframe at ~11s |
+| | KF-06 | Empty index | Returns nullopt |
+| `test_frame_buffer.cpp` | FB-01 | Push and retrieve by PTS | frameBefore returns correct frame |
+| | FB-02 | frameAfter returns next frame | Correct PTS ordering |
+| | FB-03 | frameBefore with no match | Returns nullopt |
+| | FB-04 | Eviction on budget overflow | Frame count < 5 with tiny budget |
+| | FB-05 | clear empties buffer | empty() == true, frameCount() == 0 |
+| | FB-06 | Concurrent push + read | No crash, no deadlock |
+| `test_seeking.cpp` | SK-01 | Seek to second 0 | Position within ±33,333 µs of 0 |
+| | SK-02 | Seek to second 15 | Position within ±33,333 µs of 15s |
+| | SK-03 | Seek to second 29 | Position within ±33,333 µs of 29s |
+| | SK-04 | Seek during playback | Position updates correctly after seek |
+| | SK-05 | Step forward | Position advances by ~1 frame |
+| | SK-06 | Step backward | Position goes back by ~1 frame |
+| | SK-07 | Multiple seeks (5 targets) | All within tolerance |
+| | SK-08 | Controller + step integration | State is PAUSED after stepping |
+
+**Result:** 20 Phase 3 tests passing. 59/59 cumulative. ASan clean.
 
 ---
 
-## PHASE 4 — Multi-Video Tests `🔓 Unblocked pending Phase 3`
+## PHASE 4 — Multi-Video Tests `🔓 Unblocked`
 
 > **Prerequisite:** Phase 3 complete.
 
@@ -195,7 +210,7 @@ Seek unit for Phase 3: **microseconds**.
 
 ---
 
-## PHASE 5 — Robustness Tests `🔓 Unblocked pending Phase 2`
+## PHASE 5 — Robustness Tests `🔓 Unblocked`
 
 > **Prerequisite:** Phase 2 complete (real FFmpegBackend available).
 
@@ -211,7 +226,7 @@ Seek unit for Phase 3: **microseconds**.
 
 ---
 
-## PHASE 6 — Performance Tests `🔓 Unblocked pending Phase 3 + hardware`
+## PHASE 6 — Performance Tests `🔓 Unblocked`
 
 > **Prerequisite:** Phase 3 complete + reference hardware agreed.
 
@@ -254,13 +269,13 @@ Seek unit for Phase 3: **microseconds**.
 
 ## Order of Execution and Dependencies
 
-| Phase | Status | Blocker |
-|---|---|---|
-| Phase 1 — Unit Tests | ✅ IMPLEMENTED | — |
-| Phase 2 — Integration Coarse | 🔓 READY | — |
-| Phase 3 — Fine Temporal | 🔓 Conditional | Phase 2 complete |
-| Phase 4 — Multi-Video | 🔓 Conditional | Phase 3 + MCAP Conan dep |
-| Phase 5 — Robustness | 🔓 Conditional | Phase 2 complete |
-| Phase 6 — Performance | 🔓 Conditional | Phase 3 + hardware agreed |
-| Phase 7 — PlotJuggler Integration | 🔒 DEFERRED | Phase 2 complete + PJ Qt version confirmed |
+| Eval Phase | Maps to PLAN.md | Status | Blocker |
+|---|---|---|---|
+| Phase 1 — Unit Tests | Phase 1 (Adapter + Scaffold) | COMPLETE (21 tests) | — |
+| Phase 2 — Integration Coarse | Phase 2 (Core Types + File Playback) | COMPLETE (18 tests) | — |
+| Phase 3 — Fine Temporal | Phase 3 (Seeking + Frame Stepping) | COMPLETE (20 tests) | — |
+| Phase 4 — Multi-Video | Phase 6 (MCAP Source) | 🔓 Unblocked | Phase 3 complete; needs MCAP dep |
+| Phase 5 — Robustness | Phase 2+ | 🔓 Unblocked | — |
+| Phase 6 — Performance | Phase 3+ | 🔓 Unblocked | Needs hardware agreed |
+| Phase 7 — PlotJuggler Integration | Phase 5 (Timeline Sync) | 🔒 DEFERRED | PJ Qt version confirmed |
 

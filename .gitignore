@@ -8,6 +8,7 @@ cmake-build-*/
 conan_cache/
 
 # CMake
+CMakeUserPresets.json
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
@@ -46,3 +47,19 @@ tests/data/
 # OS
 .DS_Store
 Thumbs.db
+
+# -------------------------
+# Markdown control
+# -------------------------
+
+# Ignorar markdown no esenciales
+CLAUDE.md
+*.notes.md
+*.tmp.md
+*.draft.md
+
+# (Opcional más estricto)
+# Ignorar todos los md excepto docs y README
+# *.md
+# !docs/*.md
+# !README.md
